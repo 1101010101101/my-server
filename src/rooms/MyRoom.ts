@@ -14,10 +14,11 @@ export class MyRoom extends Room {
     }
   }
 
-  onCreate (options: any) {
-    /**
-     * Called when a new room is created.
-     */
+    onCreate(options: any) {
+        this.onMessage("moveCube", (client, data) => {
+            this.broadcast("moveCube", data, { except: client });
+        });
+
   }
 
   onJoin (client: Client, options: any) {
