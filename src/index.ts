@@ -14,3 +14,10 @@ import app from "./app.config.js";
 
 // Create and listen on 2567 (or PORT environment variable.)
 listen(app);
+import http from "http";
+
+// Ping self every 10 minutes to prevent sleeping
+setInterval(() => {
+    http.get("http://localhost:10000");
+}, 10 * 60 * 1000);
+
