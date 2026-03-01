@@ -94,7 +94,24 @@ export class CubeRoom extends Room {
     onJoin(client: Client, options: any) {
         console.log(`[CubeRoom] Client ${client.sessionId} joined.`);
 
-        // Create player data with a default spawn position
+        // 1) Tell the newcomer about each EXISTING player individually.
+        //    We send separate "playerJoined" + "remotePlayerMove" messages
+        //    for each one. This avoids MsgPack nested-array deserialization
+        //    issues on the C# client.
+        this.players.forEach((pd, sid) => {
+            client.send("playerJoined", { sid: sid });
+            client.send("remotePlayerMove", {
+                sid: sid,
+                x: pd.x,
+                y: pd.y,
+                z: pd.z,
+                rx: pd.rx,
+                ry: pd.ry,
+                rz: pd.rz,
+            });
+        });
+
+        // 2) Add the new player to tracking
         const newPlayer: PlayerData = {
             sessionId: client.sessionId,
             x: 0,
@@ -106,16 +123,7 @@ export class CubeRoom extends Room {
         };
         this.players.set(client.sessionId, newPlayer);
 
-        // 1) Tell the NEW client about ALL existing players (excluding themselves)
-        const existingList: PlayerData[] = [];
-        this.players.forEach((pd, sid) => {
-            if (sid !== client.sessionId) {
-                existingList.push(pd);
-            }
-        });
-        client.send("existingPlayers", { players: existingList });
-
-        // 2) Tell ALL OTHER clients that a new player joined
+        // 3) Tell ALL OTHER clients that a new player joined
         this.broadcast("playerJoined", { sid: client.sessionId }, { except: client });
     }
 
