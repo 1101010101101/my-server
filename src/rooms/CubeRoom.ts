@@ -33,7 +33,7 @@ interface PlayerData {
 }
 
 /** Server tick rate in Hz — how often batched updates are sent */
-const TICK_RATE = 20;
+const TICK_RATE = 30;
 
 export class CubeRoom extends Room {
 
