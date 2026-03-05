@@ -1,25 +1,14 @@
 /**
  * CubeRoom.ts
  *
- * Colyseus Room definition — OPTIMIZED for lower perceived latency.
- *
- * Changes vs original:
- *   - Server-side tick loop (20 Hz) batches all dirty playerMove updates
- *     into a SINGLE broadcast per tick instead of per-message.
- *     This reduces WebSocket frame overhead and smooths out timing.
- *   - Shorter payload keys reduce bytes on the wire.
- *
- * Player flow:
- *   1. Client joins → server tracks them, broadcasts "pJ" to others,
- *      sends existing players list to the newcomer.
- *   2. Client sends "playerMove" → server stores their latest transform,
- *      marks them dirty. On next tick, broadcasts to ALL OTHER clients.
- *   3. Client leaves → server broadcasts "pL" to remaining clients.
+ * Colyseus Room with:
+ *   - Tick-based player position batching (30 Hz)
+ *   - WebRTC signaling relay for P2P connections
+ *   - Fallback server relay for position sync
  */
 
 import { Room, Client } from "colyseus";
 
-// Player's last-known transform
 interface PlayerData {
     sessionId: string;
     x: number;
@@ -28,50 +17,38 @@ interface PlayerData {
     rx: number;
     ry: number;
     rz: number;
-    dirty: boolean;       // true if position changed since last tick
-    client: Client;       // reference to the client for exclusion
+    dirty: boolean;
+    client: Client;
 }
 
-/** Server tick rate in Hz — how often batched updates are sent */
 const TICK_RATE = 30;
 
 export class CubeRoom extends Room {
 
-    /** Maximum clients per room */
     maxClients = 10;
-
-    /** Map of sessionId → last-known player transform */
     private players: Map<string, PlayerData> = new Map();
-
-    /** Interval handle for the tick loop */
     private tickInterval: ReturnType<typeof setInterval> | null = null;
 
     onCreate(options: any) {
         console.log("[CubeRoom] Room created!", this.roomId);
 
         // -----------------------------------------------------------------
-        // Legacy: "moveCube" — broadcasts cube position to all OTHER clients
+        // Legacy cube sync
         // -----------------------------------------------------------------
         this.onMessage("moveCube", (client: Client, data: any) => {
             this.broadcast("moveCube", {
                 sid: client.sessionId,
-                x: data.x,
-                y: data.y,
-                z: data.z,
-                rx: data.rx,
-                ry: data.ry,
-                rz: data.rz,
+                x: data.x, y: data.y, z: data.z,
+                rx: data.rx, ry: data.ry, rz: data.rz,
             }, { except: client });
         });
 
         // -----------------------------------------------------------------
-        // Player character sync: "playerMove"
-        // Just store + mark dirty. Actual broadcast happens in tick().
+        // Player position sync (server relay fallback)
         // -----------------------------------------------------------------
         this.onMessage("playerMove", (client: Client, data: any) => {
             const pd = this.players.get(client.sessionId);
             if (!pd) return;
-
             pd.x  = data.x  ?? pd.x;
             pd.y  = data.y  ?? pd.y;
             pd.z  = data.z  ?? pd.z;
@@ -82,31 +59,59 @@ export class CubeRoom extends Room {
         });
 
         // -----------------------------------------------------------------
-        // Start the tick loop
+        // WebRTC Signaling — relay between specific peers
+        // -----------------------------------------------------------------
+
+        // SDP Offer: sender → server → target peer
+        this.onMessage("webrtc-offer", (client: Client, data: any) => {
+            const target = this.players.get(data.target);
+            if (target) {
+                target.client.send("webrtc-offer", {
+                    from: client.sessionId,
+                    sdp: data.sdp,
+                });
+            }
+        });
+
+        // SDP Answer: responder → server → initiator
+        this.onMessage("webrtc-answer", (client: Client, data: any) => {
+            const target = this.players.get(data.target);
+            if (target) {
+                target.client.send("webrtc-answer", {
+                    from: client.sessionId,
+                    sdp: data.sdp,
+                });
+            }
+        });
+
+        // ICE Candidate: relay to specific peer
+        this.onMessage("webrtc-ice", (client: Client, data: any) => {
+            const target = this.players.get(data.target);
+            if (target) {
+                target.client.send("webrtc-ice", {
+                    from: client.sessionId,
+                    candidate: data.candidate,
+                    sdpMid: data.sdpMid,
+                    sdpMLineIndex: data.sdpMLineIndex,
+                });
+            }
+        });
+
+        // -----------------------------------------------------------------
+        // Tick loop
         // -----------------------------------------------------------------
         this.tickInterval = setInterval(() => this.tick(), 1000 / TICK_RATE);
-
-        // Make this room visible in the lobby
         this.setMetadata({ name: options.roomName || "Game Room" });
     }
 
-    /**
-     * Server tick — broadcasts all dirty player positions in one pass.
-     * Each dirty player gets one broadcast to everyone except themselves.
-     */
     private tick() {
         this.players.forEach((pd) => {
             if (!pd.dirty) return;
             pd.dirty = false;
-
             this.broadcast("remotePlayerMove", {
                 sid: pd.sessionId,
-                x: pd.x,
-                y: pd.y,
-                z: pd.z,
-                rx: pd.rx,
-                ry: pd.ry,
-                rz: pd.rz,
+                x: pd.x, y: pd.y, z: pd.z,
+                rx: pd.rx, ry: pd.ry, rz: pd.rz,
             }, { except: pd.client });
         });
     }
@@ -114,37 +119,28 @@ export class CubeRoom extends Room {
     onJoin(client: Client, options: any) {
         console.log(`[CubeRoom] Client ${client.sessionId} joined.`);
 
-        // 1) Tell the newcomer about each EXISTING player
+        // Tell newcomer about existing players
         this.players.forEach((pd, sid) => {
-            client.send("playerJoined", { sid: sid });
+            client.send("playerJoined", { sid });
             client.send("remotePlayerMove", {
-                sid: sid,
-                x: pd.x,
-                y: pd.y,
-                z: pd.z,
-                rx: pd.rx,
-                ry: pd.ry,
-                rz: pd.rz,
+                sid, x: pd.x, y: pd.y, z: pd.z,
+                rx: pd.rx, ry: pd.ry, rz: pd.rz,
             });
         });
 
-        // 2) Add the new player to tracking
-        const newPlayer: PlayerData = {
+        // Add new player
+        this.players.set(client.sessionId, {
             sessionId: client.sessionId,
-            x: 0, y: 0, z: 0,
-            rx: 0, ry: 0, rz: 0,
-            dirty: false,
-            client: client,
-        };
-        this.players.set(client.sessionId, newPlayer);
+            x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0,
+            dirty: false, client,
+        });
 
-        // 3) Tell ALL OTHER clients that a new player joined
+        // Tell others
         this.broadcast("playerJoined", { sid: client.sessionId }, { except: client });
     }
 
     onLeave(client: Client, consented: boolean) {
         console.log(`[CubeRoom] Client ${client.sessionId} left.`);
-
         this.players.delete(client.sessionId);
         this.broadcast("playerLeft", { sid: client.sessionId });
     }
