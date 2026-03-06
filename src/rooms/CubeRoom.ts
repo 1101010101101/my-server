@@ -67,39 +67,36 @@ export class CubeRoom extends Room {
         // Client sends their position+rotation, server stores and relays.
         // -----------------------------------------------------------------
         this.onMessage("playerMove", (client: Client, data: any) => {
-            const sid = client.sessionId;
+            try {
+                const sid = client.sessionId;
 
-            // Update stored transform + state
-            const pd = this.players.get(sid);
-            if (pd) {
-                pd.x   = data.x   ?? pd.x;
-                pd.y   = data.y   ?? pd.y;
-                pd.z   = data.z   ?? pd.z;
-                pd.rx  = data.rx  ?? pd.rx;
-                pd.ry  = data.ry  ?? pd.ry;
-                pd.rz  = data.rz  ?? pd.rz;
-                pd.spd = data.spd ?? pd.spd;
-                pd.lax = data.lax ?? pd.lax;
-                pd.cr  = data.cr  ?? pd.cr;
-                pd.gr  = data.gr  ?? pd.gr;
-                pd.sp  = data.sp  ?? pd.sp;
+                // Update stored transform + state
+                const pd = this.players.get(sid);
+                if (pd) {
+                    pd.x   = data.x   ?? pd.x;
+                    pd.y   = data.y   ?? pd.y;
+                    pd.z   = data.z   ?? pd.z;
+                    pd.rx  = data.rx  ?? pd.rx;
+                    pd.ry  = data.ry  ?? pd.ry;
+                    pd.rz  = data.rz  ?? pd.rz;
+                    pd.spd = data.spd ?? pd.spd;
+                    pd.lax = data.lax ?? pd.lax;
+                    pd.cr  = data.cr  ?? pd.cr;
+                    pd.gr  = data.gr  ?? pd.gr;
+                    pd.sp  = data.sp  ?? pd.sp;
+                }
+
+                // Broadcast to everyone EXCEPT the sender
+                this.broadcast("remotePlayerMove", {
+                    sid: sid,
+                    x: data.x ?? 0, y: data.y ?? 0, z: data.z ?? 0,
+                    rx: data.rx ?? 0, ry: data.ry ?? 0, rz: data.rz ?? 0,
+                    spd: data.spd ?? 0, lax: data.lax ?? 0,
+                    cr: data.cr ?? false, gr: data.gr ?? true, sp: data.sp ?? false,
+                }, { except: client });
+            } catch (e) {
+                console.error(`[CubeRoom] Error in playerMove:`, e);
             }
-
-            // Broadcast to everyone EXCEPT the sender
-            this.broadcast("remotePlayerMove", {
-                sid: sid,
-                x: data.x,
-                y: data.y,
-                z: data.z,
-                rx: data.rx,
-                ry: data.ry,
-                rz: data.rz,
-                spd: data.spd,
-                lax: data.lax,
-                cr: data.cr,
-                gr: data.gr,
-                sp: data.sp,
-            }, { except: client });
         });
 
         // Make this room visible in the lobby
@@ -107,22 +104,23 @@ export class CubeRoom extends Room {
     }
 
     onJoin(client: Client, options: any) {
-        console.log(`[CubeRoom] Client ${client.sessionId} joined.`);
+        console.log(`[CubeRoom] Client ${client.sessionId} joined. Total players: ${this.players.size}`);
 
         // 1) Tell the newcomer about each EXISTING player individually.
-        //    We send separate "playerJoined" + "remotePlayerMove" messages
-        //    for each one. This avoids MsgPack nested-array deserialization
-        //    issues on the C# client.
-        this.players.forEach((pd, sid) => {
-            client.send("playerJoined", { sid: sid });
-            client.send("remotePlayerMove", {
-                sid: sid,
-                x: pd.x, y: pd.y, z: pd.z,
-                rx: pd.rx, ry: pd.ry, rz: pd.rz,
-                spd: pd.spd, lax: pd.lax,
-                cr: pd.cr, gr: pd.gr, sp: pd.sp,
+        try {
+            this.players.forEach((pd, sid) => {
+                client.send("playerJoined", { sid: sid });
+                client.send("remotePlayerMove", {
+                    sid: sid,
+                    x: pd.x, y: pd.y, z: pd.z,
+                    rx: pd.rx, ry: pd.ry, rz: pd.rz,
+                    spd: pd.spd ?? 0, lax: pd.lax ?? 0,
+                    cr: pd.cr ?? false, gr: pd.gr ?? true, sp: pd.sp ?? false,
+                });
             });
-        });
+        } catch (e) {
+            console.error(`[CubeRoom] Error sending existing players to ${client.sessionId}:`, e);
+        }
 
         // 2) Add the new player to tracking
         const newPlayer: PlayerData = {
